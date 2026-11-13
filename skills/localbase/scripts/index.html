@@ -429,9 +429,29 @@
       case "export": case "dump": return actionExport(base);
       case "import": case "restore": return actionImport(base, entree);
       case "reset": return actionReset(base, entree);
+      case "debug": case "ping": return actionDebug(base);
       default:
-        throw refuser("Action inconnue « " + action + " ». Actions : schema, create, insert, query, update, delete, drop, export, import, reset.");
+        throw refuser("Action inconnue « " + action + " ». Actions : schema, create, insert, query, show, update, delete, drop, export, import, reset, debug.");
     }
+  }
+
+  // ------------------------------------------------------------ diagnostic
+  // « mouchard » : si ceci ne répond pas, le problème est le chargement du script, pas les données.
+  function actionDebug(base) {
+    var octets = 0;
+    try { octets = (localStorage.getItem(CLE) || "").length; } catch (e) { octets = -1; }
+    var infos = [
+      "origin=" + (typeof location !== "undefined" ? location.origin : "?"),
+      "ua=" + (typeof navigator !== "undefined" ? String(navigator.userAgent).slice(0, 90) : "?"),
+      "stockage=" + octets + "o",
+      "tables=" + Object.keys(base.tables).length,
+      "version=1"
+    ];
+    return {
+      result: "pong — " + infos.join(" | "),
+      ok: true,
+      next: "Recopie cette ligne telle quelle à l'utilisateur."
+    };
   }
 
   // ------------------------------------------------------------ contrat
@@ -441,10 +461,12 @@
       var sortie = executer(entree);
       return JSON.stringify(sortie);
     } catch (erreur) {
+      var message = String((erreur && erreur.message) || erreur || "échec inconnu");
+      // On ne renvoie JAMAIS de champ `error` : l'app le traite apparemment comme un échec
+      // d'exécution de l'outil, et le petit modèle n'a alors plus rien à répondre.
       return JSON.stringify({
-        error: String((erreur && erreur.message) || erreur || "échec inconnu"),
-        // Le petit modèle a besoin d'une phrase à dire : sans elle il récite
-        // « No relevant skills found » du prompt système.
+        result: "Échec : " + message,
+        ok: false,
         next: "Explique cette erreur à l'utilisateur dans sa langue, puis propose l'action corrective indiquée."
       });
     }

@@ -49,6 +49,7 @@ run_js(
 | `export` | — | returns the whole database as JSON (backup) |
 | `import` | `json`, `confirm:true` | restores a backup, replacing everything |
 | `reset` | `confirm:true` | wipes everything |
+| `debug` | — | `pong` + origin, user agent, storage size, table count. Use it when a call seems to fail. |
 
 ## Working rules
 
@@ -69,8 +70,11 @@ run_js(
 
 - Success → `result`: a short summary, then one line per row: `2. #7 · Nom = Dupont | Ville = Montpellier`.
   `#7` is the row id for `update`/`delete`. `count` is the number of matching rows.
-- `error` comes back in French: relay it in the user's language. It always names the fix (missing
-  column, unknown table, list of available columns, quota).
+- A failure comes back as `result` starting with **`Échec :`** and `ok:false` — never as a separate
+  error field. Read it, translate it for the user, and do what it says (it names the fix).
+- If a call appears to fail with no message at all, call `{"action":"debug"}`: it answers `pong` with
+  the origin, the storage size and the table count. A `pong` means the script runs; no `pong` means
+  the page did not load.
 - Answer in the user's language, quoting values exactly as returned.
 
 ## Limits
