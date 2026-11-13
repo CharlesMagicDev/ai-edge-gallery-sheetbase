@@ -1,8 +1,12 @@
-# SheetBase RAG — an Agent Skill for Google AI Edge Gallery
+# Agent Skills for Google AI Edge Gallery
 
-Keyword retrieval over any **public Google Sheet**, executed inside the on-device WebView.
-One `SKILL.md`, one `scripts/index.html`, Vanilla JavaScript. No API key, no OAuth, no backend,
-no build step — just a URL to import.
+Two on-device skills for [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery), both
+plain Vanilla JavaScript running inside the WebView. No API key, no OAuth, no backend, no build step —
+just a URL to import.
+
+- **`sheetbase-rag`** — keyword retrieval over any **public Google Sheet** (network at call time).
+- **`localbase`** — a small **on-device database** the agent creates, fills, searches and edits;
+  data persists in the WebView storage, nothing leaves the phone.
 
 ## Import on your phone
 
@@ -10,13 +14,15 @@ no build step — just a URL to import.
    **E4B** (better reasoning).
 2. Open **Agent Skills** → **Try it** with the model loaded.
 3. Tap the **Skills** icon → **+** → **Load skill from URL**.
-4. Paste this folder URL (no `SKILL.md` suffix, GitHub Pages serves the MIME types the WebView needs):
+4. Paste the folder URL of the skill you want (no `SKILL.md` suffix, GitHub Pages serves the MIME
+   types the WebView needs):
 
    ```
    https://charlesmagicdev.github.io/ai-edge-gallery-sheetbase/skills/sheetbase-rag
+   https://charlesmagicdev.github.io/ai-edge-gallery-sheetbase/skills/localbase
    ```
 
-5. Add, then just ask: *"Search the sheet https://docs.google.com/spreadsheets/d/…/edit for Montpellier."*
+5. Just ask, e.g. *"Search the sheet https://docs.google.com/spreadsheets/d/…/edit for Montpellier."*
 
 The sheet must be shared as **Anyone with the link — Viewer**.
 
@@ -42,6 +48,27 @@ with the whole sheet.
 A sheet whose cells were pasted as raw CSV into a single column is detected and re-split into real
 columns, so results come back as `B17 « Nom »` instead of one giant `A6`.
 
+## localbase — the on-device database
+
+Same contract, different job: the agent keeps structured data **on the phone**.
+
+```json
+{"action":"create","table":"clients","columns":["Nom","Ville","Tel"]}
+{"action":"insert","table":"clients","rows":[{"Nom":"Dupont","Ville":"Montpellier"}]}
+{"action":"query","table":"clients","keyword":"montpellier"}
+{"action":"update","table":"clients","id":2,"values":{"Tel":"0600000000"}}
+{"action":"delete","table":"clients","id":3}
+```
+
+Actions: `schema`, `create`, `insert`, `query`, `update`, `delete`, `drop`, `export`, `import`,
+`reset`. Every row gets a stable `_id` used by `update`/`delete`; destructive actions require
+`confirm:true`. Storage is one `localStorage` key (`localbase.v1`) holding JSON, rewritten on each
+write, guarded at 4 MB — the WebView origin is shared by every skill and capped near 5 MB, hence the
+prefix and the `export`/`drop` path.
+
+`domStorageEnabled = true` in `GalleryWebView.kt` is what makes this possible; the origin is
+`https://appassets.androidplatform.net`, stable across calls and app restarts.
+
 ## Limits, stated plainly
 
 - Retrieval is **lexical** (accent- and case-insensitive substring matching), not embedding-based:
@@ -55,10 +82,14 @@ columns, so results come back as `B17 « Nom »` instead of one giant `A6`.
 ```
 .nojekyll                              # GitHub Pages: serve files as-is
 skills/
-└── sheetbase-rag/
-    ├── SKILL.md                       # YAML frontmatter (name, description) + instructions
+├── sheetbase-rag/
+│   ├── SKILL.md                       # YAML frontmatter (name, description) + instructions
+│   └── scripts/
+│       └── index.html                 # window['ai_edge_gallery_get_result'] = async (data, secret)
+└── localbase/
+    ├── SKILL.md
     └── scripts/
-        └── index.html                 # window['ai_edge_gallery_get_result'] = async (data, secret)
+        └── index.html                 # same contract, localStorage instead of a Sheet
 ```
 
 ## Tested
@@ -70,3 +101,6 @@ Headless Chromium, calling the function exactly the way the app does:
 - private sheet (403) → actionable French error
 - a real public sheet: 30 rows, range `A1:F31`, 1 match on `alexandra`, cell reference returned
 - CSV edge cases: `"Dupont, Jean"` and `"Client ""fidèle"", depuis 2019"`
+- localbase, CRUD end to end, then a **browser restart** on the same profile: table, rows, edit and
+  delete all survived; `export` → `reset` → `import` restored the exact state; unknown column,
+  unknown id, missing `confirm` and non-JSON input all return actionable errors, no JS exception

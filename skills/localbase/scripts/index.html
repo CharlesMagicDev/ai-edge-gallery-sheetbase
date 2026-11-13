@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalBase</title>
+</head>
+<body>
+<!--
+  localbase — petite base de données tabulaire LOCALE, dans le WebView d'AI Edge Gallery.
+
+  Contrat AI Edge Gallery : la page expose UNE fonction asynchrone
+      window['ai_edge_gallery_get_result'] = async (data, secret) => "…JSON…"
+  appelée par run_js avec `data` = chaîne JSON. Elle renvoie :
+      { "result": "texte lisible", … }   en cas de succès
+      { "error":  "message en français" } en cas d'échec
+
+  Persistance : localStorage de l'origine appassets.androidplatform.net (domStorageEnabled=true
+  côté WebView). Une seule clé, tout le contenu de la base, réécrite à chaque écriture.
+  Rien n'est chargé au démarrage : seule l'appel de la fonction travaille.
+-->
+<script>
+(function () {
+  "use strict";
+
+  var CLE = "localbase.v1";          // préfixe : l'origine est partagée par tous les skills
+  var MAX_TABLES = 30;
+  var MAX_COLONNES = 16;
+  var MAX_CELLULE = 500;
+  var BUDGET_OCTETS = 4 * 1024 * 1024; // marge sous le quota WebView (~5 Mo par origine)
+
+  // ------------------------------------------------------------ utilitaires
+  function normaliser(valeur) {
+    return String(valeur == null ? "" : valeur)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+      .trim();
+  }
+
+  function couper(valeur, maximum) {
+    var texte = String(valeur == null ? "" : valeur).replace(/\s+/g, " ").trim();
+    if (!maximum || texte.length <= maximum) return texte;
+    return texte.slice(0, maximum - 1) + "…";
+  }
+
+  function entier(valeur) {
+    var n = parseInt(valeur, 10);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function nomTable(valeur) {
+    return String(valeur == null ? "" : valeur).trim().toLowerCase().replace(/\s+/g, "_");
+  }
+
+  function refuser(message) {
+    var erreur = new Error(message);
+    erreur.attendue = true;
+    return erreur;
+  }
+
+  // ------------------------------------------------------------ stockage
+  function baseVide() {
+    return { version: 1, tables: {} };
+  }
+
+  function charger() {
+    var brut = null;
+    try { brut = localStorage.getItem(CLE); } catch (e) {
+      throw refuser("Stockage local indisponible dans ce WebView : impossible de créer la base.");
+    }
+    if (!brut) return baseVide();
+    try {
+      var base = JSON.parse(brut);
+      if (!base || typeof base !== "object" || !base.tables) return baseVide();
+      return base;
+    } catch (e) {
+      throw refuser("Base locale illisible (JSON corrompu). Faire action=export avant toute écriture, puis action=reset.");
+    }
+  }
+
+  function enregistrer(base) {
+    var texte = JSON.stringify(base);
+    if (texte.length > BUDGET_OCTETS) {
+      throw refuser("Quota atteint (" + Math.round(texte.length / 1024) + " Ko). Faire action=export puis action=drop sur les tables inutiles.");
+    }
+    try {
+      localStorage.setItem(CLE, texte);
+    } catch (e) {
+      throw refuser("Écriture impossible : quota du WebView dépassé. Faire action=export puis action=drop sur les tables inutiles.");
+    }
+    return texte.length;
+  }
+
+  function table(base, nom, creer) {
+    var cle = nomTable(nom);
+    if (!cle) throw refuser("Nom de table manquant : donner \"table\" (ex. \"clients\").");
+    var t = base.tables[cle];
+    if (!t && creer) throw refuser("Table « " + cle + " » introuvable. Tables existantes : " + listeTables(base) + ". Utiliser action=create.");
+    if (!t) return { cle: cle, table: null };
+    return { cle: cle, table: t };
+  }
+
+  function listeTables(base) {
+    var noms = Object.keys(base.tables);
+    return noms.length ? noms.join(", ") : "(aucune)";
+  }
+
+  function colonnesDe(t) {
+    return t.columns.slice();
+  }
+
+  function verifierColonnes(t, objet) {
+    var connues = colonnesDe(t);
+    var inconnues = Object.keys(objet).filter(function (c) {
+      return c !== "_id" && connues.indexOf(c) === -1;
+    });
+    if (inconnues.length) {
+      throw refuser("Colonne(s) inconnue(s) : " + inconnues.join(", ") +
+        ". Colonnes de « " + t.name + " » : " + connues.join(", ") + ".");
+    }
+  }
+
+  function ligneLisible(t, ligne, position, maxLength) {
+    var morceaux = [];
+    t.columns.forEach(function (colonne) {
+      var valeur = couper(ligne[colonne], maxLength);
+      if (valeur) morceaux.push(colonne + " = " + valeur);
+    });
+    return (position + 1) + ". #" + ligne._id + " · " + (morceaux.join(" | ") || "(ligne vide)");
+  }
+
+  // ------------------------------------------------------------ actions
+  function actionSchema(base) {
+    var noms = Object.keys(base.tables);
+    if (!noms.length) {
+      return { result: "Base locale vide (0 table). Créer avec {action:\"create\", table:\"…\", columns:[…]}." };
+    }
+    var lignes = ["Base locale : " + noms.length + " table(s)."];
+    noms.forEach(function (nom) {
+      var t = base.tables[nom];
+      lignes.push("- " + t.name + " : " + t.rows.length + " ligne(s) · colonnes " +
+        t.columns.map(function (c, i) { return c; }).join(" | "));
+    });
+    return {
+      result: lignes.join("\n"),
+      tables: noms.map(function (nom) {
+        return { table: nom, rows: base.tables[nom].rows.length, columns: base.tables[nom].columns };
+      })
+    };
+  }
+
+  function actionCreate(base, entree) {
+    var cle = nomTable(entree.table);
+    if (!cle) throw refuser("Nom de table manquant : {action:\"create\", table:\"clients\", columns:[\"Nom\",\"Ville\"]}.");
+    if (base.tables[cle]) {
+      if (entree.ifNotExists) {
+        return { result: "Table « " + cle + " » existe déjà : " + base.tables[cle].rows.length + " ligne(s)." };
+      }
+      throw refuser("Table « " + cle + " » existe déjà. Utiliser action=insert, ou ifNotExists:true.");
+    }
+    if (Object.keys(base.tables).length >= MAX_TABLES) {
+      throw refuser("Limite de " + MAX_TABLES + " tables atteinte. Faire action=drop sur une table inutile.");
+    }
+    var colonnes = (entree.columns || []).map(function (c) { return String(c).trim(); }).filter(Boolean);
+    if (!colonnes.length) throw refuser("Colonnes manquantes : donner columns:[\"Nom\",\"Ville\"] (au moins une).");
+    if (colonnes.length > MAX_COLONNES) throw refuser("Trop de colonnes (" + colonnes.length + ", max " + MAX_COLONNES + ").");
+    var doublons = colonnes.filter(function (c, i) { return colonnes.indexOf(c) !== i; });
+    if (doublons.length) throw refuser("Colonne(s) en double : " + doublons.join(", ") + ".");
+
+    base.tables[cle] = { name: cle, columns: colonnes, rows: [], nextId: 1, createdAt: new Date().toISOString() };
+    enregistrer(base);
+    return {
+      result: "Table « " + cle + " » créée : colonnes " + colonnes.join(" | ") + ". 0 ligne. " +
+              "Remplir avec {action:\"insert\", table:\"" + cle + "\", rows:[{…}]}.",
+      table: cle, columns: colonnes, count: 0
+    };
+  }
+
+  function actionInsert(base, entree) {
+    var trouve = table(base, entree.table, true);
+    var t = trouve.table;
+    var lignes = entree.rows;
+    if (!Array.isArray(lignes)) lignes = entree.row ? [entree.row] : [];
+    if (!lignes.length) throw refuser("Aucune ligne à insérer : rows:[{\"Nom\":\"Dupont\",\"Ville\":\"Montpellier\"}].");
+    if (lignes.length > 500) throw refuser("Trop de lignes d'un coup (" + lignes.length + ", max 500).");
+
+    var ajoutees = [];
+    lignes.forEach(function (brute) {
+      if (!brute || typeof brute !== "object") throw refuser("Chaque ligne doit être un objet {colonne: valeur}.");
+      verifierColonnes(t, brute);
+      var ligne = { _id: t.nextId++ };
+      t.columns.forEach(function (colonne) {
+        var valeur = brute[colonne] == null ? "" : String(brute[colonne]);
+        if (valeur.length > MAX_CELLULE) throw refuser("Cellule trop longue (" + valeur.length + " caractères, max " + MAX_CELLULE + ") pour « " + colonne + " ».");
+        ligne[colonne] = valeur;
+      });
+      t.rows.push(ligne);
+      ajoutees.push(ligne);
+    });
+
+    enregistrer(base);
+    var apercu = ajoutees.slice(0, 10).map(function (l, i) { return ligneLisible(t, l, t.rows.length - ajoutees.length + i, entree.maxLength); });
+    return {
+      result: ajoutees.length + " ligne(s) ajoutée(s) dans « " + t.name + " » (total " + t.rows.length + ").\n" + apercu.join("\n"),
+      table: t.name, inserted: ajoutees.length, count: t.rows.length,
+      ids: ajoutees.map(function (l) { return l._id; })
+    };
+  }
+
+  function actionQuery(base, entree) {
+    var t = table(base, entree.table, true).table;
+    var cible = normaliser(entree.keyword || entree.query || "");
+    var filtres = (entree.columns || []).map(normaliser).filter(Boolean);
+    var cherchees = t.columns.filter(function (c) { return !filtres.length || filtres.indexOf(normaliser(c)) !== -1; });
+
+    if (filtres.length && !cherchees.length) {
+      throw refuser("Colonne(s) introuvable(s) : " + entree.columns.join(", ") + ". Colonnes de « " + t.name + " » : " + t.columns.join(", ") + ".");
+    }
+
+    var trouvees = [];
+    t.rows.forEach(function (ligne, index) {
+      var touchees = [];
+      if (cible !== "") {
+        cherchees.forEach(function (colonne) {
+          if (normaliser(ligne[colonne]).indexOf(cible) !== -1) touchees.push(colonne);
+        });
+      }
+      if (cible === "" || touchees.length) trouvees.push({ ligne: ligne, position: index, touchees: touchees });
+    });
+
+    var total = trouvees.length;
+    var plafond = entree.limit ? entier(entree.limit) : (cible === "" ? 10 : 0);
+    var montrees = plafond ? trouvees.slice(0, plafond) : trouvees;
+
+    var resume = [];
+    resume.push("Table « " + t.name + " » : " + t.rows.length + " ligne(s) · colonnes " + t.columns.join(" | ") + ".");
+    resume.push((cible ? "Recherche « " + entree.keyword + " »" : "Aperçu") + " — " + total + " ligne(s)" +
+      (total > montrees.length ? ", " + montrees.length + " listée(s) sur " + total + " (limit ou mot-clé pour affiner)" : " (toutes listées)") + ".");
+    montrees.forEach(function (item, i) {
+      var texte = ligneLisible(t, item.ligne, i, entree.maxLength);
+      resume.push(texte);
+    });
+    if (!total) resume.push("Aucune correspondance : essayer un mot plus court (recherche insensible aux accents et à la casse).");
+
+    return {
+      result: resume.join("\n"),
+      table: t.name, count: total, columns: t.columns,
+      rows: montrees.map(function (item) {
+        return { id: item.ligne._id, row: item.position + 1, matches: item.touchees, data: item.ligne };
+      })
+    };
+  }
+
+  function actionUpdate(base, entree) {
+    var t = table(base, entree.table, true).table;
+    var id = parseInt(entree.id, 10);
+    if (!isFinite(id)) throw refuser("id manquant : {action:\"update\", table:\"" + t.name + "\", id:3, values:{\"Ville\":\"Nîmes\"}}.");
+    var valeurs = entree.values || entree.row || {};
+    verifierColonnes(t, valeurs);
+    var ligne = null;
+    t.rows.forEach(function (l) { if (l._id === id) ligne = l; });
+    if (!ligne) throw refuser("Aucune ligne #" + id + " dans « " + t.name + " ». Utiliser action=query pour retrouver l'id.");
+
+    var changees = [];
+    Object.keys(valeurs).forEach(function (colonne) {
+      if (colonne === "_id") return;
+      var valeur = valeurs[colonne] == null ? "" : String(valeurs[colonne]);
+      if (valeur.length > MAX_CELLULE) throw refuser("Cellule trop longue (max " + MAX_CELLULE + ") pour « " + colonne + " ».");
+      if (String(ligne[colonne]) !== valeur) { ligne[colonne] = valeur; changees.push(colonne); }
+    });
+    if (!changees.length) return { result: "Ligne #" + id + " inchangée : aucune valeur différente. " + ligneLisible(t, ligne, 0, 0).replace(/^1\. /, ""), table: t.name, id: id, updated: 0 };
+
+    enregistrer(base);
+    var position = t.rows.indexOf(ligne);
+    return {
+      result: "Ligne #" + id + " mise à jour (" + changees.join(", ") + ") : " + ligneLisible(t, ligne, position, entree.maxLength),
+      table: t.name, id: id, updated: changees.length, row: ligne
+    };
+  }
+
+  function actionDelete(base, entree) {
+    var t = table(base, entree.table, true).table;
+    var id = parseInt(entree.id, 10);
+    if (!isFinite(id)) throw refuser("id manquant : {action:\"delete\", table:\"" + t.name + "\", id:3}.");
+    var avant = t.rows.length;
+    t.rows = t.rows.filter(function (l) { return l._id !== id; });
+    if (t.rows.length === avant) throw refuser("Aucune ligne #" + id + " dans « " + t.name + " ». Utiliser action=query pour retrouver l'id.");
+    enregistrer(base);
+    return { result: "Ligne #" + id + " supprimée de « " + t.name + " » (reste " + t.rows.length + " ligne(s)).", table: t.name, id: id, count: t.rows.length };
+  }
+
+  function actionDrop(base, entree) {
+    var cle = nomTable(entree.table);
+    if (!base.tables[cle]) throw refuser("Table « " + cle + " » introuvable. Tables existantes : " + listeTables(base) + ".");
+    if (!entree.confirm) {
+      throw refuser("Suppression de « " + cle + " » (" + base.tables[cle].rows.length + " ligne(s)) : renvoyer la même demande avec confirm:true.");
+    }
+    delete base.tables[cle];
+    enregistrer(base);
+    return { result: "Table « " + cle + " » supprimée. Tables restantes : " + listeTables(base) + "." };
+  }
+
+  function actionExport(base) {
+    var json = JSON.stringify(base);
+    return {
+      result: "Export de la base (" + Math.round(json.length / 1024) + " Ko, " +
+        Object.keys(base.tables).length + " table(s)). Copier la valeur de \"json\" pour la sauvegarder.",
+      json: json
+    };
+  }
+
+  function actionImport(base, entree) {
+    var brut = entree.json || entree.data || "";
+    if (!brut) throw refuser("Rien à importer : fournir json (le contenu d'un export).");
+    var nouvelle;
+    try { nouvelle = JSON.parse(brut); } catch (e) { throw refuser("JSON invalide : l'import doit être le contenu exact d'un export localbase."); }
+    if (!nouvelle || typeof nouvelle !== "object" || !nouvelle.tables) throw refuser("Format inattendu : objet {version, tables} attendu.");
+    if (entree.confirm !== true) {
+      throw refuser("L'import remplace la base actuelle (" + Object.keys(base.tables).length + " table(s)). Renvoyer avec confirm:true.");
+    }
+    enregistrer(nouvelle);
+    return actionSchema(nouvelle);
+  }
+
+  function actionReset(base, entree) {
+    if (entree.confirm !== true) throw refuser("Efface toute la base. Renvoyer avec confirm:true.");
+    enregistrer(baseVide());
+    return { result: "Base locale effacée (0 table)." };
+  }
+
+  function lireEntree(data) {
+    var brut = data;
+    if (typeof brut === "string") {
+      var texte = brut.trim();
+      if (texte.charAt(0) === "{") {
+        try { brut = JSON.parse(texte); } catch (e) { throw refuser("data n'est pas un JSON valide : envoyer une chaîne comme {\"action\":\"schema\"}."); }
+      } else if (texte) {
+        throw refuser("data doit être un objet JSON : {\"action\":\"schema\"} ou {\"action\":\"query\",\"table\":\"clients\",\"keyword\":\"…\"}.");
+      } else {
+        brut = {};
+      }
+    }
+    return (brut && typeof brut === "object") ? brut : {};
+  }
+
+  function executer(entree) {
+    var action = String(entree.action || "schema").toLowerCase();
+    var base = charger();
+
+    switch (action) {
+      case "schema": case "list_tables": case "tables": return actionSchema(base);
+      case "create": case "create_table": return actionCreate(base, entree);
+      case "insert": case "add": case "append": return actionInsert(base, entree);
+      case "query": case "search": case "find": case "list": return actionQuery(base, entree);
+      case "update": case "set": case "edit": return actionUpdate(base, entree);
+      case "delete": case "remove": return actionDelete(base, entree);
+      case "drop": case "drop_table": return actionDrop(base, entree);
+      case "export": case "dump": return actionExport(base);
+      case "import": case "restore": return actionImport(base, entree);
+      case "reset": return actionReset(base, entree);
+      default:
+        throw refuser("Action inconnue « " + action + " ». Actions : schema, create, insert, query, update, delete, drop, export, import, reset.");
+    }
+  }
+
+  // ------------------------------------------------------------ contrat
+  window["ai_edge_gallery_get_result"] = async function (data /*, secret */) {
+    try {
+      var entree = lireEntree(data);
+      var sortie = executer(entree);
+      return JSON.stringify(sortie);
+    } catch (erreur) {
+      return JSON.stringify({ error: String((erreur && erreur.message) || erreur || "échec inconnu") });
+    }
+  };
+})();
+</script>
+</body>
+</html>
