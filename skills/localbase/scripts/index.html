@@ -135,7 +135,11 @@
   function actionSchema(base) {
     var noms = Object.keys(base.tables);
     if (!noms.length) {
-      return { result: "Base locale vide (0 table). Créer avec {action:\"create\", table:\"…\", columns:[…]}." };
+      return {
+        result: "Base locale vide (0 table). Créer avec {action:\"create\", table:\"…\", columns:[…]}.",
+        tables: [], empty: true,
+        next: "Dis qu'il n'y a encore aucune table et propose d'en créer une en demandant les colonnes utiles."
+      };
     }
     var lignes = ["Base locale : " + noms.length + " table(s)."];
     noms.forEach(function (nom) {
@@ -145,6 +149,7 @@
     });
     return {
       result: lignes.join("\n"),
+      next: "Réponds à l'utilisateur avec ce résumé ; s'il veut voir le détail d'une table, utilise {action:\"query\",table:\"…\"}.",
       tables: noms.map(function (nom) {
         return { table: nom, rows: base.tables[nom].rows.length, columns: base.tables[nom].columns };
       })
@@ -174,6 +179,7 @@
     return {
       result: "Table « " + cle + " » créée : colonnes " + colonnes.join(" | ") + ". 0 ligne. " +
               "Remplir avec {action:\"insert\", table:\"" + cle + "\", rows:[{…}]}.",
+      next: "Enchaîne tout de suite avec {action:\"insert\"} et les valeurs déjà données par l'utilisateur, sans redemander les colonnes.",
       table: cle, columns: colonnes, count: 0
     };
   }
@@ -204,13 +210,28 @@
     var apercu = ajoutees.slice(0, 10).map(function (l, i) { return ligneLisible(t, l, t.rows.length - ajoutees.length + i, entree.maxLength); });
     return {
       result: ajoutees.length + " ligne(s) ajoutée(s) dans « " + t.name + " » (total " + t.rows.length + ").\n" + apercu.join("\n"),
+      next: "Réponds en confirmant le nombre de lignes et les #id, sans relire toute la table.",
       table: t.name, inserted: ajoutees.length, count: t.rows.length,
       ids: ajoutees.map(function (l) { return l._id; })
     };
   }
 
   function actionQuery(base, entree) {
-    var t = table(base, entree.table, true).table;
+    var trouve = table(base, entree.table, false);
+    // Table absente : ce n'est pas une erreur, c'est un état de départ. Renvoyer un `result`
+    // (et non un `error`) évite au petit modèle de conclure « No relevant skills found ».
+    if (!trouve.table) {
+      var existantes = Object.keys(base.tables);
+      return {
+        result: "Aucune table « " + trouve.cle + " » : la base ne contient " +
+          (existantes.length ? "que : " + existantes.join(", ") + "." : "encore aucune table.") +
+          " Rien à interroger pour l'instant.",
+        table: trouve.cle, count: 0, empty: true, tables: existantes,
+        next: "Dis à l'utilisateur que la table n'existe pas encore, propose de la créer " +
+              "(colonnes à confirmer) avec {action:\"create\",table:\"" + trouve.cle + "\",columns:[…]}."
+      };
+    }
+    var t = trouve.table;
     var cible = normaliser(entree.keyword || entree.query || "");
     var filtres = (entree.columns || []).map(normaliser).filter(Boolean);
     var cherchees = t.columns.filter(function (c) { return !filtres.length || filtres.indexOf(normaliser(c)) !== -1; });
@@ -247,6 +268,9 @@
     return {
       result: resume.join("\n"),
       table: t.name, count: total, columns: t.columns,
+      next: total
+        ? "Réponds à l'utilisateur en citant les valeurs telles quelles et le #id de chaque ligne."
+        : "Dis qu'aucune ligne ne correspond, propose un mot-clé plus court, ou {action:\"schema\"} pour revoir les colonnes.",
       rows: montrees.map(function (item) {
         return { id: item.ligne._id, row: item.position + 1, matches: item.touchees, data: item.ligne };
       })
@@ -372,7 +396,12 @@
       var sortie = executer(entree);
       return JSON.stringify(sortie);
     } catch (erreur) {
-      return JSON.stringify({ error: String((erreur && erreur.message) || erreur || "échec inconnu") });
+      return JSON.stringify({
+        error: String((erreur && erreur.message) || erreur || "échec inconnu"),
+        // Le petit modèle a besoin d'une phrase à dire : sans elle il récite
+        // « No relevant skills found » du prompt système.
+        next: "Explique cette erreur à l'utilisateur dans sa langue, puis propose l'action corrective indiquée."
+      });
     }
   };
 })();

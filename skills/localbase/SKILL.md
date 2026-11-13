@@ -25,6 +25,15 @@ run_js(
 
 `data` is a **JSON string**, not an object. **One action per call.**
 
+## After every call
+
+- Every answer carries a `next` field: **one sentence telling you what to do or say next**. Follow it.
+- **Never answer "No relevant skills found" after a call.** That sentence belongs to the app's skill
+  selection step, not to a result. If you received a `result` or an `error`, answer the user in their
+  language, from that content.
+- An empty database is **not an error**: `query` on a table that does not exist yet returns
+  `empty: true` with a `result` explaining it. Say so and propose to create the table — do not stop.
+
 ## Actions
 
 | action | fields | what it does |
