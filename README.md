@@ -69,6 +69,20 @@ prefix and the `export`/`drop` path.
 `domStorageEnabled = true` in `GalleryWebView.kt` is what makes this possible; the origin is
 `https://appassets.androidplatform.net`, stable across calls and app restarts.
 
+### What it is good for
+
+One sentence in the chat becomes the calls:
+
+- **client / prospect book** — *"ajoute Dupont à Montpellier, à rappeler mardi"*, then *"qui je dois rappeler cette semaine ?"*
+- **job site tracking** — lot, date, avancement, réserve, updated day after day
+- **quotes and invoices** — *"quels devis sans réponse depuis 15 jours ?"*
+- **equipment inventory** — *"il reste combien de projecteurs en état ?"*
+- **idea / reading log** — *"montre-moi les idées non traitées"*
+- **admin follow-up** — démarche, échéance, pièce manquante
+
+The full turn-by-turn walkthrough (create → insert → query → update) is in the
+[discussion post](https://github.com/google-ai-edge/gallery/discussions/1563).
+
 ## Limits, stated plainly
 
 - Retrieval is **lexical** (accent- and case-insensitive substring matching), not embedding-based:
