@@ -54,6 +54,10 @@ run_js(
 
 - **"Show me the table" means `show`, not `query`.** `show` returns a markdown table the user can
   read; `query` is for looking *for* something (a keyword) and returns one line per match.
+- **Batch the rows.** When the user gives several rows at once ("add these five clients"), send them in
+  **one** `insert` with `rows:[{…},{…},…]` (up to 500) — not one call per row. One call is one turn;
+  five calls are five turns where a small model loses the thread. Same for the columns: never split a
+  row across two calls.
 - **Never invent an `_id`.** Read it from the last `query`/`insert` answer, or call `query` first.
 - **Check before creating**: `schema` costs one call and avoids "table already exists".
 - An empty `keyword` lists the first 10 rows — use it to see what a table contains.
