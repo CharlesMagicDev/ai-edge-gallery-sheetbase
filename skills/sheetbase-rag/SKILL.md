@@ -40,7 +40,9 @@ embeddings and no index. The sheet is streamed as CSV at call time, so the sheet
 ## Optional parameters
 
 All optional: without them the search is exhaustive (every matching row, every cell in full, all
-columns).
+columns). One exception: an **empty keyword with no `limit` is a discovery call** — the first 10 rows
+are listed and the summary says so ("découverte : les 10 premières sont listées sur 82"), so a small
+model is not drowned before it can ask for a keyword.
 
 - **limit**: return at most N matching rows (`"limit": 20`).
 - **maxLength**: truncate each cell to N characters (`"maxLength": 120`).

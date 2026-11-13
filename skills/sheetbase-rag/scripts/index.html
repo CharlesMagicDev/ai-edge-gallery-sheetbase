@@ -89,6 +89,35 @@
     });
   }
 
+  // Cas « CSV collé dans une seule colonne » : chaque ligne du classeur contient un
+  // enregistrement CSV complet, guillemets compris. On le redécoupe en vraies colonnes,
+  // sinon la recherche ne renvoie qu'une colonne géante et des références A2/A3 inutilisables.
+  function corrigerColonneUnique(lignes) {
+    if (!lignes.length) return lignes;
+    var uneSeuleColonne = lignes.every(function (l) { return l.length <= 1; });
+    if (!uneSeuleColonne) return lignes;
+
+    var entete = String(lignes[0][0] || "");
+    var structureCSV = /"[^"]*"\s*,\s*"[^"]*"/.test(entete) || /^[^,]*,\s*"[^"]*"/.test(entete);
+    if (!structureCSV) return lignes;
+
+    var redécoupées = lignes.map(function (l) { return analyserCSV(String(l[0] || ""))[0] || []; });
+    var largeurs = redécoupées.map(function (l) { return l.length; });
+    var frequent = {};
+    largeurs.forEach(function (n) { frequent[n] = (frequent[n] || 0) + 1; });
+    var mode = 0, meilleur = 0;
+    Object.keys(frequent).forEach(function (n) {
+      if (frequent[n] > meilleur) { meilleur = frequent[n]; mode = parseInt(n, 10); }
+    });
+    if (mode < 2 || meilleur / largeurs.length < 0.5) return lignes;
+
+    var propre = redécoupées.map(function (l) {
+      while (l.length < mode) l.push("");
+      return l.slice(0, mode);
+    });
+    return propre;
+  }
+
   function identifiants(url) {
     var texte = String(url || "").trim();
     var gid = (texte.match(/[#&?]gid=([0-9]+)/) || [])[1] || "0";
@@ -215,7 +244,7 @@
       return Promise.reject(new Error("sheetUrl manquant : appeler l'outil avec {\"sheetUrl\": \"https://docs.google.com/spreadsheets/d/…/edit\", \"keyword\": \"…\"}."));
     }
     return telecharger(entree.sheetUrl).then(function (texte) {
-      var lignes = analyserCSV(texte);
+      var lignes = corrigerColonneUnique(analyserCSV(texte));
       if (!lignes.length) throw new Error("La feuille est vide.");
 
       var avecEntetes = entetesProbables(lignes[0]);
@@ -262,7 +291,11 @@
       }
 
       var total = retenues.length;
-      var montrees = entree.limit ? retenues.slice(0, entree.limit) : retenues;
+      // Découverte (mot-clé vide, aucune limite demandée) : lister tout noierait un petit
+      // modèle sous des milliers de caractères. On montre les 10 premières et on le dit.
+      var decouverte = entree.keyword === "" && !entree.limit;
+      var plafond = decouverte ? 10 : entree.limit;
+      var montrees = plafond ? retenues.slice(0, plafond) : retenues;
 
       var nbColonnes = nbColonnesTotal;
       var derniereLigne = corps.length + (avecEntetes ? 1 : 0);
@@ -272,7 +305,11 @@
                   lettre(Math.max(0, nbColonnes - 1)) + Math.max(1, derniereLigne) + " (la ligne 1 = les en-têtes).");
       resume.push("Recherche : " + (entree.keyword ? "« " + entree.keyword + " »" : "(vide : premières lignes)") +
                   " — " + total + " ligne(s), " + nbCellules + " cellule(s)" +
-                  (total > montrees.length ? ", limit=" + montrees.length + " : les " + montrees.length + " premières sont listées" : " (toutes listées)") + ".");
+                  (total > montrees.length
+                    ? (decouverte
+                        ? ", découverte : les " + montrees.length + " premières sont listées sur " + total + " — donner un mot-clé ou limit pour la suite"
+                        : ", limit=" + montrees.length + " : les " + montrees.length + " premières sont listées")
+                    : " (toutes listées)") + ".");
       resume.push("Colonnes : " + (avecEntetes
         ? entetes.map(function (e, index) { return lettre(index) + " = " + (String(e).trim() || ("colonne_" + (index + 1))); }).join(" | ")
         : "pas d'en-tête détecté, colonnes nommées col1, col2…"));

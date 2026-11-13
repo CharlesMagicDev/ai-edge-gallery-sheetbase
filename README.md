@@ -35,7 +35,12 @@ text summary plus structured rows: every match carries its **row number**, the *
 to look and edit.
 
 Optional parameters: `limit`, `maxLength`, `columns` (by header or letter), `gid`, `timeoutMs`.
-Nothing is capped by default.
+Nothing is capped by default — with one deliberate exception: an empty keyword with no `limit` is a
+discovery call, so it lists the first 10 rows and says so, instead of flooding a small context window
+with the whole sheet.
+
+A sheet whose cells were pasted as raw CSV into a single column is detected and re-split into real
+columns, so results come back as `B17 « Nom »` instead of one giant `A6`.
 
 ## Limits, stated plainly
 
