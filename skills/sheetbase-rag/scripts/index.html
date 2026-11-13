@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sheetbase Ultra Simple</title>
+</head>
+<body>
+<!--
+  sheetbase-ultra-simple — recherche par mot-clé dans une Google Sheet publique.
+
+  Contrat AI Edge Gallery : la page expose UNE fonction asynchrone
+      window['ai_edge_gallery_get_result'] = async (data, secret) => "…JSON…"
+  appelée par run_js avec `data` = chaîne JSON. Elle renvoie :
+      { "result": "texte lisible" }        en cas de succès
+      { "error":  "message en français" }  en cas d'échec
+
+  Rien ne s'exécute au chargement : la page est chargée cachée, seule l'appel
+  de la fonction déclenche le téléchargement de la feuille.
+-->
+<script>
+(function () {
+  "use strict";
+
+  // Aucun plafond par défaut : tout ce qui correspond est renvoyé. Le modèle (ou
+  // l'utilisateur) peut réduire avec limit / maxLength quand la feuille est énorme.
+  var TIMEOUT_DEFAUT = 20000;   // ms, par tentative de téléchargement
+
+  // ------------------------------------------------------------ utilitaires
+  function normaliser(valeur) {
+    return String(valeur == null ? "" : valeur)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+      .trim();
+  }
+
+  // Lettre de colonne : 0 -> A, 25 -> Z, 26 -> AA (comme dans la barre de formule).
+  function lettre(index) {
+    var n = index + 1, sortie = "";
+    while (n > 0) {
+      var reste = (n - 1) % 26;
+      sortie = String.fromCharCode(65 + reste) + sortie;
+      n = Math.floor((n - 1) / 26);
+    }
+    return sortie;
+  }
+
+  function couper(valeur, maximum) {
+    var texte = String(valeur == null ? "" : valeur).replace(/\s+/g, " ").trim();
+    if (!maximum || texte.length <= maximum) return texte;
+    return texte.slice(0, maximum - 1) + "…";
+  }
+
+  function entier(valeur) {
+    var n = parseInt(valeur, 10);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function analyserCSV(texte) {
+    var lignes = [], ligne = [], champ = "", entreGuillemets = false, i = 0, c;
+    texte = String(texte || "").replace(/^\uFEFF/, "");
+
+    while (i < texte.length) {
+      c = texte[i];
+      if (entreGuillemets) {
+        if (c === '"') {
+          if (texte[i + 1] === '"') { champ += '"'; i += 2; continue; }
+          entreGuillemets = false; i++; continue;
+        }
+        champ += c; i++; continue;
+      }
+      if (c === '"') { entreGuillemets = true; i++; continue; }
+      if (c === ",") { ligne.push(champ); champ = ""; i++; continue; }
+      if (c === "\r") { i++; continue; }
+      if (c === "\n") { ligne.push(champ); lignes.push(ligne); ligne = []; champ = ""; i++; continue; }
+      champ += c; i++;
+    }
+    if (champ.length > 0 || ligne.length > 0) { ligne.push(champ); lignes.push(ligne); }
+
+    // gviz padde parfois les lignes de colonnes vides en fin : on les retire.
+    return lignes.map(function (l) {
+      var fin = l.length;
+      while (fin > 0 && String(l[fin - 1]).trim() === "") fin--;
+      return l.slice(0, fin);
+    }).filter(function (l) {
+      return l.some(function (cellule) { return String(cellule).trim() !== ""; });
+    });
+  }
+
+  function identifiants(url) {
+    var texte = String(url || "").trim();
+    var gid = (texte.match(/[#&?]gid=([0-9]+)/) || [])[1] || "0";
+    var publie = texte.match(/\/spreadsheets\/d\/e\/([A-Za-z0-9_-]+)/);
+    if (publie) return { cle: publie[1], publie: true, gid: gid };
+    var classique = texte.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]{20,})/);
+    if (classique) return { cle: classique[1], publie: false, gid: gid };
+    if (/^[A-Za-z0-9_-]{20,}$/.test(texte)) return { cle: texte, publie: false, gid: gid };
+    return null;
+  }
+
+  function urlsCSV(url, gidForce) {
+    var brut = String(url || "").trim();
+    var candidats = [];
+    if (/output=csv|format=csv/.test(brut)) candidats.push(brut);
+
+    var ids = identifiants(brut);
+    if (!ids) return candidats;
+    if (gidForce) ids.gid = String(gidForce);
+
+    if (ids.publie) {
+      candidats.push("https://docs.google.com/spreadsheets/d/e/" + ids.cle + "/pub?output=csv&gid=" + ids.gid);
+      candidats.push("https://docs.google.com/spreadsheets/d/e/" + ids.cle + "/pub?output=csv");
+    } else {
+      // gviz répond avec un en-tête CORS permissif ; export sert de repli.
+      candidats.push("https://docs.google.com/spreadsheets/d/" + ids.cle + "/gviz/tq?tqx=out:csv&gid=" + ids.gid);
+      candidats.push("https://docs.google.com/spreadsheets/d/" + ids.cle + "/export?format=csv&gid=" + ids.gid);
+      candidats.push("https://docs.google.com/spreadsheets/d/" + ids.cle + "/export?format=csv");
+    }
+    return candidats;
+  }
+
+  // ------------------------------------------------------------ entrée reçue
+  function lireEntree(data) {
+    var brut = data;
+    if (typeof brut === "string") {
+      var texte = brut.trim();
+      if (texte.charAt(0) === "{" || texte.charAt(0) === "[") {
+        try { brut = JSON.parse(texte); } catch (e) { brut = { sheetUrl: texte }; }
+      } else {
+        brut = { sheetUrl: texte };
+      }
+    }
+    brut = brut && typeof brut === "object" ? brut : {};
+
+    var url = brut.sheetUrl || brut.sheet_url || brut.url || brut.link || brut.sheet ||
+              brut.spreadsheet || brut.spreadsheetUrl || brut.lien || "";
+    var motCle = brut.keyword || brut.query || brut.q || brut.search || brut.recherche || brut.motCle || "";
+
+    if (!url && typeof brut.text === "string") {
+      var trouve = brut.text.match(/https?:\/\/docs\.google\.com\/\S+/);
+      if (trouve) url = trouve[0];
+    }
+    var colonnes = brut.columns || brut.colonnes || brut.onlyColumns || [];
+    if (typeof colonnes === "string") colonnes = colonnes.split(",");
+    if (!Array.isArray(colonnes)) colonnes = [];
+
+    return {
+      sheetUrl: String(url || "").trim(),
+      keyword: String(motCle || "").trim(),
+      gid: brut.gid != null ? String(brut.gid) : "",
+      limit: entier(brut.limit != null ? brut.limit : brut.maxRows != null ? brut.maxRows : brut.lignes),
+      maxLength: entier(brut.maxLength != null ? brut.maxLength : brut.maxCellLength != null ? brut.maxCellLength : brut.troncature),
+      timeoutMs: entier(brut.timeoutMs != null ? brut.timeoutMs : brut.timeout),
+      columns: colonnes.map(function (c) { return String(c).trim(); }).filter(Boolean)
+    };
+  }
+
+  // ------------------------------------------------------------ téléchargement
+  function telecharger(url, gidForce, timeoutMs) {
+    var candidats = urlsCSV(url, gidForce);
+    var delai = timeoutMs || TIMEOUT_DEFAUT;
+    if (!candidats.length) {
+      return Promise.reject(new Error("URL non reconnue : donner l'adresse complète d'une Google Sheet (https://docs.google.com/spreadsheets/d/<identifiant>/edit)."));
+    }
+    var index = 0;
+    function essayer() {
+      if (index >= candidats.length) {
+        return Promise.reject(new Error("Téléchargement impossible. La feuille doit être partagée « Tout le monde disposant du lien — Lecteur », et le lien doit être complet."));
+      }
+      var cible = candidats[index++];
+      var controleur = new AbortController();
+      var minuteur = setTimeout(function () { controleur.abort(); }, delai);
+      return fetch(cible, { signal: controleur.signal, credentials: "omit", redirect: "follow" })
+        .then(function (reponse) {
+          clearTimeout(minuteur);
+          if (!reponse.ok) throw new Error("HTTP " + reponse.status);
+          return reponse.text();
+        })
+        .then(function (texte) {
+          if (/^\s*<(!doctype|html)/i.test(texte)) throw new Error("réponse HTML");
+          if (/^\s*\/\*O_o\*\//.test(texte) || /google\.visualization/.test(texte)) throw new Error("réponse JSON gviz");
+          if (!texte.trim()) throw new Error("vide");
+          return texte;
+        })
+        .catch(function () { return essayer(); });
+    }
+    return essayer();
+  }
+
+  // ------------------------------------------------------------ traitement
+  function entetesProbables(ligne) {
+    if (!ligne || !ligne.length) return false;
+    var vides = 0, numeriques = 0;
+    ligne.forEach(function (cellule) {
+      var valeur = String(cellule).trim();
+      if (!valeur) { vides++; return; }
+      if (/^[-+]?[0-9][0-9 .,]*$/.test(valeur)) numeriques++;
+    });
+    return vides !== ligne.length && numeriques === 0;
+  }
+
+  function objets(entetes, valeurs) {
+    var objet = {};
+    entetes.forEach(function (entete, index) {
+      var cle = String(entete || "").trim() || ("colonne_" + (index + 1));
+      objet[cle] = valeurs[index] == null ? "" : valeurs[index];
+    });
+    return objet;
+  }
+
+  function executer(entree) {
+    if (!entree.sheetUrl) {
+      return Promise.reject(new Error("sheetUrl manquant : appeler l'outil avec {\"sheetUrl\": \"https://docs.google.com/spreadsheets/d/…/edit\", \"keyword\": \"…\"}."));
+    }
+    return telecharger(entree.sheetUrl).then(function (texte) {
+      var lignes = analyserCSV(texte);
+      if (!lignes.length) throw new Error("La feuille est vide.");
+
+      var avecEntetes = entetesProbables(lignes[0]);
+      var entetes = avecEntetes ? lignes[0].map(function (v) { return String(v).trim(); }) : [];
+      var corps = avecEntetes ? lignes.slice(1) : lignes;
+      var cible = normaliser(entree.keyword);
+
+      var nomColonne = function (index) {
+        if (!avecEntetes) return "col" + (index + 1);
+        return String(entetes[index] || "").trim() || ("colonne_" + (index + 1));
+      };
+
+      // Colonnes à interroger : par nom, ou par lettre (A, B…). Vide = toutes.
+      var filtres = (entree.columns || []).map(normaliser);
+      var cherchees = null;
+      var nbColonnesTotal = avecEntetes ? entetes.length : ((lignes[0] || []).length);
+      if (filtres.length) {
+        cherchees = [];
+        for (var k = 0; k < nbColonnesTotal; k++) {
+          var nom = normaliser(nomColonne(k));
+          if (filtres.indexOf(nom) !== -1 || filtres.indexOf(normaliser(lettre(k))) !== -1) cherchees.push(k);
+        }
+        if (!cherchees.length) {
+          throw new Error("Colonnes introuvables : " + entree.columns.join(", ") + ". Colonnes disponibles : " +
+            Array.from({ length: nbColonnesTotal }, function (_, k) { return lettre(k) + "=" + nomColonne(k); }).join(", ") + ".");
+        }
+      }
+
+      var retenues = [];
+      var nbCellules = 0;
+      for (var i = 0; i < corps.length; i++) {
+        var valeurs = corps[i];
+        var touchees = [];
+        if (cible !== "") {
+          valeurs.forEach(function (cellule, index) {
+            if (cherchees && cherchees.indexOf(index) === -1) return;
+            if (normaliser(cellule).indexOf(cible) !== -1) touchees.push(index);
+          });
+        }
+        if (cible === "" || touchees.length) {
+          nbCellules += cible === "" ? valeurs.length : touchees.length;
+          retenues.push({ ligne: i + (avecEntetes ? 2 : 1), valeurs: valeurs, touchees: touchees });
+        }
+      }
+
+      var total = retenues.length;
+      var montrees = entree.limit ? retenues.slice(0, entree.limit) : retenues;
+
+      var nbColonnes = nbColonnesTotal;
+      var derniereLigne = corps.length + (avecEntetes ? 1 : 0);
+
+      var resume = [];
+      resume.push("Feuille : " + corps.length + " ligne(s) de données, " + nbColonnes + " colonne(s) — plage A1:" +
+                  lettre(Math.max(0, nbColonnes - 1)) + Math.max(1, derniereLigne) + " (la ligne 1 = les en-têtes).");
+      resume.push("Recherche : " + (entree.keyword ? "« " + entree.keyword + " »" : "(vide : premières lignes)") +
+                  " — " + total + " ligne(s), " + nbCellules + " cellule(s)" +
+                  (total > montrees.length ? ", limit=" + montrees.length + " : les " + montrees.length + " premières sont listées" : " (toutes listées)") + ".");
+      resume.push("Colonnes : " + (avecEntetes
+        ? entetes.map(function (e, index) { return lettre(index) + " = " + (String(e).trim() || ("colonne_" + (index + 1))); }).join(" | ")
+        : "pas d'en-tête détecté, colonnes nommées col1, col2…"));
+
+      montrees.forEach(function (item, position) {
+        // Les cellules qui contiennent le mot-clé, avec leur coordonnée (ex. B12).
+        var trouvees = item.touchees.map(function (index) {
+          return lettre(index) + item.ligne + " « " + nomColonne(index) + " » = " + couper(item.valeurs[index], entree.maxLength);
+        });
+        var autres = [];
+        item.valeurs.forEach(function (valeur, index) {
+          if (item.touchees.indexOf(index) !== -1) return;
+          var propre = couper(valeur, entree.maxLength);
+          if (propre) autres.push(nomColonne(index) + " = " + propre);
+        });
+        var ligne = (position + 1) + ". ligne " + item.ligne;
+        if (trouvees.length) ligne += " · " + trouvees.join(" · ");
+        if (autres.length) ligne += " | " + autres.join(" · ");
+        resume.push(ligne);
+      });
+
+      if (!total) resume.push("Aucune correspondance : essayer un mot-clé plus court, sans accent, ou un autre mot de la ligne.");
+
+      return {
+        result: resume.join("\n"),
+        kind: "table",
+        count: total,
+        columns: entetes,
+        rows: montrees.map(function (item) {
+          return {
+            row: item.ligne,
+            cells: item.touchees.map(function (index) { return lettre(index) + item.ligne; }),
+            columns: item.touchees.map(nomColonne),
+            data: avecEntetes ? objets(entetes, item.valeurs) : item.valeurs
+          };
+        })
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ contrat
+  window["ai_edge_gallery_get_result"] = async function (data /*, secret */) {
+    try {
+      var entree = lireEntree(data);
+      var sortie = await executer(entree);
+      return JSON.stringify(sortie);
+    } catch (erreur) {
+      return JSON.stringify({
+        error: String((erreur && erreur.message) || erreur || "échec inconnu")
+      });
+    }
+  };
+})();
+</script>
+</body>
+</html>
