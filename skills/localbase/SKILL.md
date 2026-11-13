@@ -42,6 +42,7 @@ run_js(
 | `create` | `table`, `columns:["Nom","Ville"]` | creates a table (`ifNotExists:true` to tolerate an existing one) |
 | `insert` | `table`, `rows:[{…}]` | appends rows, returns the new `ids` |
 | `query` | `table`, `keyword`, optional `columns`, `limit` | keyword search, accent- and case-insensitive |
+| `show` | `table`, optional `limit`, `maxLength` | the whole table rendered as a **markdown table** — use it when the user wants to *see* the data |
 | `update` | `table`, `id`, `values:{…}` | edits one row by its `_id` |
 | `delete` | `table`, `id` | removes one row by its `_id` |
 | `drop` | `table`, `confirm:true` | deletes a whole table |
@@ -51,6 +52,8 @@ run_js(
 
 ## Working rules
 
+- **"Show me the table" means `show`, not `query`.** `show` returns a markdown table the user can
+  read; `query` is for looking *for* something (a keyword) and returns one line per match.
 - **Never invent an `_id`.** Read it from the last `query`/`insert` answer, or call `query` first.
 - **Check before creating**: `schema` costs one call and avoids "table already exists".
 - An empty `keyword` lists the first 10 rows — use it to see what a table contains.

@@ -277,6 +277,50 @@
     };
   }
 
+  // Affichage d'une table entière, en tableau markdown : c'est la façon la plus lisible
+  // de « regarder » les données sur un téléphone, là où query est fait pour chercher.
+  function actionShow(base, entree) {
+    var trouve = table(base, entree.table, false);
+    if (!trouve.table) {
+      var existantes = Object.keys(base.tables);
+      return {
+        result: "Aucune table « " + trouve.cle + " » : la base ne contient " +
+          (existantes.length ? "que : " + existantes.join(", ") + "." : "encore aucune table."),
+        table: trouve.cle, count: 0, empty: true, tables: existantes,
+        next: "Dis à l'utilisateur quelles tables existent (" + (existantes.join(", ") || "aucune") + ") et propose de créer celle-ci."
+      };
+    }
+    var t = trouve.table;
+    if (!t.rows.length) {
+      return {
+        result: "Table « " + t.name + " » : 0 ligne. Colonnes " + t.columns.join(" | ") + ".",
+        table: t.name, count: 0, empty: true,
+        next: "Dis que la table est vide et propose d'y ajouter des lignes avec {action:\"insert\"}."
+      };
+    }
+
+    var maxLignes = entree.limit ? entier(entree.limit) : 15;
+    var maxCellule = entree.maxLength ? entier(entree.maxLength) : 40;
+    var montrees = t.rows.slice(0, maxLignes);
+    var cellule = function (v) {
+      var texte = couper(v, maxCellule);
+      return texte.replace(/\|/g, "\\|").replace(/\n/g, " ") || "—";
+    };
+    var lignes = ["| #id | " + t.columns.join(" | ") + " |", "|:--|" + t.columns.map(function () { return ":--"; }).join("|") + "|"];
+    montrees.forEach(function (ligne) {
+      lignes.push("| #" + ligne._id + " | " + t.columns.map(function (c) { return cellule(ligne[c]); }).join(" | ") + " |");
+    });
+
+    var entete = "Table « " + t.name + " » — " + t.rows.length + " ligne(s), " + t.columns.length + " colonne(s)" +
+      (t.rows.length > montrees.length ? " ; " + montrees.length + " affichée(s)" + (entree.limit ? "" : " (limit pour en voir plus)") : "") + ".";
+
+    return {
+      result: entete + "\n" + lignes.join("\n"),
+      table: t.name, count: t.rows.length, columns: t.columns, shown: montrees.length,
+      next: "Recopie ce tableau markdown tel quel dans ta réponse, sans le réécrire en phrases."
+    };
+  }
+
   function actionUpdate(base, entree) {
     var t = table(base, entree.table, true).table;
     var id = parseInt(entree.id, 10);
@@ -378,6 +422,7 @@
       case "create": case "create_table": return actionCreate(base, entree);
       case "insert": case "add": case "append": return actionInsert(base, entree);
       case "query": case "search": case "find": case "list": return actionQuery(base, entree);
+      case "show": case "table": case "view": case "voir": return actionShow(base, entree);
       case "update": case "set": case "edit": return actionUpdate(base, entree);
       case "delete": case "remove": return actionDelete(base, entree);
       case "drop": case "drop_table": return actionDrop(base, entree);
